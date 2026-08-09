@@ -1,4 +1,6 @@
 import argparse
+from datetime import datetime
+from pathlib import Path
 import time
 
 import cv2
@@ -60,6 +62,39 @@ def parse_args():
         help="Muestra la ventana de mascara/bordes. Puede bajar los FPS.",
     )
     parser.add_argument(
+        "--mode",
+        choices=["edge", "white"],
+        default="edge",
+        help="Modo de deteccion: edge detecta bordes, white detecta objetos claros.",
+    )
+    parser.add_argument(
+        "--roi",
+        help="Zona de trabajo x,y,ancho,alto. Ejemplo: --roi 80,120,500,300",
+    )
+    parser.add_argument(
+        "--min-aspect",
+        type=float,
+        default=0.35,
+        help="Proporcion minima ancho/alto para aceptar un objeto.",
+    )
+    parser.add_argument(
+        "--max-aspect",
+        type=float,
+        default=7.0,
+        help="Proporcion maxima ancho/alto para aceptar un objeto.",
+    )
+    parser.add_argument(
+        "--min-extent",
+        type=float,
+        default=0.18,
+        help="Que tanto llena el contorno su rectangulo. Mayor valor filtra ruido.",
+    )
+    parser.add_argument(
+        "--save-dir",
+        default="Capturas",
+        help="Carpeta donde se guardan capturas limpias al presionar s.",
+    )
+    parser.add_argument(
         "--allow-nested",
         action="store_true",
         help="Permite mostrar objetos detectados dentro de otros objetos.",
@@ -89,7 +124,35 @@ def resize_frame(frame, width, height):
     return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
 
 
-def build_object_mask(frame):
+def parse_roi(roi_text, frame_shape):
+    if not roi_text:
+        return None
+
+    try:
+        x, y, w, h = [int(value.strip()) for value in roi_text.split(",")]
+    except ValueError:
+        raise ValueError("El ROI debe tener el formato x,y,ancho,alto") from None
+
+    frame_h, frame_w = frame_shape[:2]
+    x = max(0, min(x, frame_w - 1))
+    y = max(0, min(y, frame_h - 1))
+    w = max(1, min(w, frame_w - x))
+    h = max(1, min(h, frame_h - y))
+
+    return x, y, w, h
+
+
+def apply_roi(mask, roi):
+    if not roi:
+        return mask
+
+    roi_mask = np.zeros_like(mask)
+    x, y, w, h = roi
+    roi_mask[y : y + h, x : x + w] = mask[y : y + h, x : x + w]
+    return roi_mask
+
+
+def build_edge_mask(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blur, 45, 130)
@@ -99,6 +162,29 @@ def build_object_mask(frame):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
 
     return mask
+
+
+def build_white_mask(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    lower_white = np.array([0, 0, 115])
+    upper_white = np.array([179, 120, 255])
+    mask = cv2.inRange(hsv, lower_white, upper_white)
+
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    return mask
+
+
+def build_object_mask(frame, mode, roi):
+    if mode == "white":
+        mask = build_white_mask(frame)
+    else:
+        mask = build_edge_mask(frame)
+
+    return apply_roi(mask, roi)
 
 
 def intersection_area(first, second):
@@ -133,7 +219,15 @@ def remove_nested_objects(objects):
     return filtered
 
 
-def find_objects(mask, min_area, max_objects, allow_nested=False):
+def find_objects(
+    mask,
+    min_area,
+    max_objects,
+    min_aspect,
+    max_aspect,
+    min_extent,
+    allow_nested=False,
+):
     frame_h, frame_w = mask.shape[:2]
 
     contours, _ = cv2.findContours(
@@ -157,6 +251,14 @@ def find_objects(mask, min_area, max_objects, allow_nested=False):
 
         bbox_area = w * h
         frame_area = frame_w * frame_h
+        aspect = w / h
+        extent = area / bbox_area if bbox_area else 0
+
+        if aspect < min_aspect or aspect > max_aspect:
+            continue
+
+        if extent < min_extent:
+            continue
 
         if bbox_area > frame_area * 0.70:
             continue
@@ -172,6 +274,11 @@ def find_objects(mask, min_area, max_objects, allow_nested=False):
         if (touches_left and touches_right) or (touches_top and touches_bottom):
             continue
 
+        rotated_rect = cv2.minAreaRect(contour)
+        rotated_w, rotated_h = rotated_rect[1]
+        rotated_long = int(max(rotated_w, rotated_h))
+        rotated_short = int(min(rotated_w, rotated_h))
+
         objects.append(
             {
                 "contour": contour,
@@ -180,6 +287,11 @@ def find_objects(mask, min_area, max_objects, allow_nested=False):
                 "y": y,
                 "w": w,
                 "h": h,
+                "aspect": aspect,
+                "extent": extent,
+                "rotated_rect": rotated_rect,
+                "rotated_w": rotated_long,
+                "rotated_h": rotated_short,
             }
         )
 
@@ -200,15 +312,33 @@ def draw_objects(frame, objects):
         area = int(obj["area"])
         center_x = x + w // 2
         center_y = y + h // 2
+        rotated_box = cv2.boxPoints(obj["rotated_rect"])
+        rotated_box = np.intp(rotated_box)
 
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.drawContours(frame, [rotated_box], 0, (0, 255, 0), 2)
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 180, 0), 1)
         cv2.circle(frame, (center_x, center_y), 4, (0, 0, 255), -1)
 
-        text = f"Obj {index}: x:{x} y:{y} w:{w} h:{h} area:{area}"
+        text = f"Obj {index} | x:{x} y:{y} | rot:{obj['rotated_w']}x{obj['rotated_h']} | area:{area}"
+        text_x = x
+        text_y = y - 8
+
+        if text_y < 55:
+            text_y = y + h + 20
+
+        text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+        text_w, text_h = text_size
+        cv2.rectangle(
+            frame,
+            (text_x - 2, text_y - text_h - 4),
+            (text_x + text_w + 2, text_y + 4),
+            (0, 0, 0),
+            -1,
+        )
         cv2.putText(
             frame,
             text,
-            (x, max(y - 8, 18)),
+            (text_x, text_y),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             (0, 255, 0),
@@ -216,11 +346,11 @@ def draw_objects(frame, objects):
         )
 
 
-def draw_status(frame, camera_index, object_count, fps=None):
+def draw_status(frame, camera_index, object_count, mode, fps=None):
     if fps is None:
-        text = f"Objetos: {object_count} | Salir: q o Esc"
+        text = f"Modo: {mode} | Objetos: {object_count} | Salir: q o Esc"
     else:
-        text = f"Camara: {camera_index} | Objetos: {object_count} | FPS: {fps:.1f} | Salir: q o Esc"
+        text = f"Camara: {camera_index} | Modo: {mode} | Objetos: {object_count} | FPS: {fps:.1f} | s:guardar | q:salir"
 
     cv2.putText(
         frame,
@@ -233,11 +363,46 @@ def draw_status(frame, camera_index, object_count, fps=None):
     )
 
 
-def detect_objects(frame, min_area, max_objects, allow_nested=False):
-    mask = build_object_mask(frame)
-    objects = find_objects(mask, min_area, max_objects, allow_nested=allow_nested)
+def draw_roi(frame, roi):
+    if not roi:
+        return
+
+    x, y, w, h = roi
+    cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
+    cv2.putText(
+        frame,
+        "ROI",
+        (x, max(y - 8, 18)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 0, 0),
+        2,
+    )
+
+
+def detect_objects(frame, args, roi):
+    mask = build_object_mask(frame, args.mode, roi)
+    objects = find_objects(
+        mask,
+        args.min_area,
+        args.max_objects,
+        args.min_aspect,
+        args.max_aspect,
+        args.min_extent,
+        allow_nested=args.allow_nested,
+    )
+    draw_roi(frame, roi)
     draw_objects(frame, objects)
     return frame, mask, objects
+
+
+def save_clean_frame(frame, save_dir):
+    output_dir = Path(save_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filename = datetime.now().strftime("captura_%Y%m%d_%H%M%S.jpg")
+    output_path = output_dir / filename
+    cv2.imwrite(str(output_path), frame)
+    return output_path
 
 
 def run_image(args):
@@ -248,20 +413,17 @@ def run_image(args):
         return
 
     frame = resize_frame(frame, args.width, args.height)
-    frame, mask, objects = detect_objects(
-        frame,
-        args.min_area,
-        args.max_objects,
-        allow_nested=args.allow_nested,
-    )
-    draw_status(frame, args.camera, len(objects))
+    roi = parse_roi(args.roi, frame.shape)
+    frame, mask, objects = detect_objects(frame, args, roi)
+    draw_status(frame, args.camera, len(objects), args.mode)
 
     print(f"Objetos detectados: {len(objects)}")
 
     for index, obj in enumerate(objects, start=1):
         print(
             f"Obj {index}: x={obj['x']} y={obj['y']} "
-            f"ancho={obj['w']} alto={obj['h']} area={int(obj['area'])}"
+            f"ancho={obj['w']} alto={obj['h']} area={int(obj['area'])} "
+            f"aspect={obj['aspect']:.2f} extent={obj['extent']:.2f}"
         )
 
     cv2.imshow("Deteccion de objetos", frame)
@@ -301,12 +463,9 @@ def run_camera(args):
             break
 
         frame = resize_frame(frame, args.width, args.height)
-        frame, mask, objects = detect_objects(
-            frame,
-            args.min_area,
-            args.max_objects,
-            allow_nested=args.allow_nested,
-        )
+        clean_frame = frame.copy()
+        roi = parse_roi(args.roi, frame.shape)
+        frame, mask, objects = detect_objects(frame, args, roi)
 
         current_time = time.perf_counter()
         elapsed = current_time - last_time
@@ -315,7 +474,7 @@ def run_camera(args):
         if elapsed > 0:
             fps = 1 / elapsed
 
-        draw_status(frame, args.camera, len(objects), fps)
+        draw_status(frame, args.camera, len(objects), args.mode, fps)
 
         cv2.imshow("Deteccion de objetos", frame)
 
@@ -323,6 +482,10 @@ def run_camera(args):
             cv2.imshow("Mascara", mask)
 
         key = cv2.waitKey(1)
+
+        if key == ord("s"):
+            output_path = save_clean_frame(clean_frame, args.save_dir)
+            print(f"Captura guardada: {output_path}")
 
         if key == 27 or key == ord("q"):
             break
