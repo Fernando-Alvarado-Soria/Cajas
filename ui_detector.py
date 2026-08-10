@@ -48,7 +48,10 @@ class DetectorApp:
         self.container_length_var = tk.StringVar(value="60")
         self.container_width_var = tk.StringVar(value="12")
         self.container_height_var = tk.StringVar(value="13")
-        self.px_per_cm_var = tk.StringVar(value="14")
+        self.px_per_cm_var = tk.StringVar(value="29.27")
+        self.px_per_cm_width_var = tk.StringVar(value="38.24")
+        self.reference_length_var = tk.StringVar(value="9.02")
+        self.reference_width_var = tk.StringVar(value="5.1")
 
         self.build_layout()
 
@@ -86,7 +89,7 @@ class DetectorApp:
         advanced = ttk.Frame(controls)
         advanced.grid(row=1, column=0, columnspan=15, sticky="ew", pady=(8, 0))
 
-        self.add_input(advanced, "Max objetos", self.max_objects_var, 0)
+        self.add_input(advanced, "Max detecciones", self.max_objects_var, 0)
         self.add_input(advanced, "Aspect min", self.min_aspect_var, 1)
         self.add_input(advanced, "Aspect max", self.max_aspect_var, 2)
         self.add_input(advanced, "Extent min", self.min_extent_var, 3)
@@ -97,27 +100,35 @@ class DetectorApp:
         self.add_input(container_controls, "Largo cm", self.container_length_var, 0)
         self.add_input(container_controls, "Ancho cm", self.container_width_var, 1)
         self.add_input(container_controls, "Alto cm", self.container_height_var, 2)
-        self.add_input(container_controls, "Px/cm", self.px_per_cm_var, 3)
+        self.add_input(container_controls, "Px/cm largo", self.px_per_cm_var, 3)
+        self.add_input(container_controls, "Px/cm ancho", self.px_per_cm_width_var, 4)
+        self.add_input(container_controls, "Ref largo", self.reference_length_var, 5)
+        self.add_input(container_controls, "Ref ancho", self.reference_width_var, 6)
+        ttk.Button(
+            container_controls,
+            text="Calibrar con deteccion",
+            command=self.calibrate_from_detection,
+        ).grid(row=0, column=7, padx=6, sticky="s")
         ttk.Button(
             container_controls,
             text="Actualizar contenedor",
             command=self.redraw_container,
-        ).grid(row=0, column=4, padx=6, sticky="s")
+        ).grid(row=0, column=8, padx=6, sticky="s")
         ttk.Button(
             container_controls,
             text="Empezar acomodo de contenedor",
             command=self.start_packing,
-        ).grid(row=0, column=5, padx=6, sticky="s")
+        ).grid(row=0, column=9, padx=6, sticky="s")
         ttk.Button(
             container_controls,
             text="Reacomodo de contenedor",
             command=self.repack_container,
-        ).grid(row=0, column=6, padx=6, sticky="s")
+        ).grid(row=0, column=10, padx=6, sticky="s")
         ttk.Button(
             container_controls,
             text="Limpiar acomodo",
             command=self.clear_packing,
-        ).grid(row=0, column=7, padx=6, sticky="s")
+        ).grid(row=0, column=11, padx=6, sticky="s")
 
         content = ttk.Frame(main)
         content.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
@@ -139,6 +150,9 @@ class DetectorApp:
             self.tree.column(column, width=70, anchor="center")
 
         self.tree.grid(row=0, column=0, sticky="nsew")
+        detections_scrollbar = ttk.Scrollbar(side, orient="vertical", command=self.tree.yview)
+        detections_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=detections_scrollbar.set)
 
         packing = ttk.LabelFrame(side, text="Acomodo del contenedor", padding=8)
         packing.grid(row=1, column=0, sticky="ew", pady=(10, 0))
@@ -172,7 +186,7 @@ class DetectorApp:
             packing,
             columns=box_columns,
             show="headings",
-            height=5,
+            height=8,
         )
 
         for column in box_columns:
@@ -180,6 +194,9 @@ class DetectorApp:
             self.box_tree.column(column, width=95, anchor="center")
 
         self.box_tree.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        box_scrollbar = ttk.Scrollbar(packing, orient="vertical", command=self.box_tree.yview)
+        box_scrollbar.grid(row=3, column=1, sticky="ns", pady=(8, 0))
+        self.box_tree.configure(yscrollcommand=box_scrollbar.set)
 
         status = ttk.Label(main, textvariable=self.status_var, anchor="w")
         status.grid(row=2, column=0, sticky="ew", pady=(8, 0))
@@ -230,12 +247,68 @@ class DetectorApp:
         )
 
     def get_px_per_cm(self):
-        px_per_cm = float(self.px_per_cm_var.get())
+        px_per_cm_length = float(self.px_per_cm_var.get())
+        px_per_cm_width = float(self.px_per_cm_width_var.get())
 
-        if px_per_cm <= 0:
-            raise ValueError("Px/cm debe ser mayor a 0.")
+        if px_per_cm_length <= 0 or px_per_cm_width <= 0:
+            raise ValueError("Px/cm largo y Px/cm ancho deben ser mayores a 0.")
 
-        return px_per_cm
+        return px_per_cm_length, px_per_cm_width
+
+    def calibrate_from_detection(self):
+        if not self.last_objects:
+            messagebox.showinfo(
+                "Sin deteccion",
+                "Primero detecta una caja de referencia con medidas conocidas.",
+            )
+            return
+
+        try:
+            reference_length = float(self.reference_length_var.get())
+            reference_width = float(self.reference_width_var.get())
+        except ValueError:
+            messagebox.showerror(
+                "Referencia invalida",
+                "Ref largo y Ref ancho deben ser numeros.",
+            )
+            return
+
+        if reference_length <= 0 or reference_width <= 0:
+            messagebox.showerror(
+                "Referencia invalida",
+                "Ref largo y Ref ancho deben ser mayores a 0.",
+            )
+            return
+
+        reference_object = self.last_objects[0]
+        px_per_cm_length = reference_object["rotated_w"] / reference_length
+        px_per_cm_width = reference_object["rotated_h"] / reference_width
+        self.px_per_cm_var.set(f"{px_per_cm_length:.2f}")
+        self.px_per_cm_width_var.set(f"{px_per_cm_width:.2f}")
+        self.recalculate_captured_box_sizes()
+
+        messagebox.showinfo(
+            "Calibracion actualizada",
+            "Escala calculada con el objeto detectado 1:\n"
+            f"Px/cm largo: {px_per_cm_length:.2f}\n"
+            f"Px/cm ancho: {px_per_cm_width:.2f}\n\n"
+            "Las cajas capturadas se recalcularon con la nueva escala.",
+        )
+
+    def recalculate_captured_box_sizes(self):
+        try:
+            px_per_cm_length, px_per_cm_width = self.get_px_per_cm()
+        except ValueError:
+            return
+
+        for box in self.captured_boxes:
+            box["length_cm"] = round(box["source_rotated_w"] / px_per_cm_length, 2)
+            box["width_cm"] = round(box["source_rotated_h"] / px_per_cm_width, 2)
+
+        if self.packing_started:
+            self.recompute_packing()
+        else:
+            self.redraw_container()
 
     def redraw_container(self):
         try:
@@ -413,7 +486,7 @@ class DetectorApp:
         canvas.create_text(
             origin_x,
             origin_y + 34,
-            text="Si no caben, revisa Px/cm o las medidas reales del contenedor.",
+            text="Si no caben, calibra Px/cm largo/ancho o revisa las medidas reales.",
             anchor="w",
             fill="#b00020",
         )
@@ -529,12 +602,12 @@ class DetectorApp:
         return min(valid_options, key=lambda option: option[1])
 
     def add_detected_boxes_to_container(self, objects, timestamp, image_path):
-        px_per_cm = self.get_px_per_cm()
+        px_per_cm_length, px_per_cm_width = self.get_px_per_cm()
         added_boxes = []
 
         for obj in objects:
-            length_cm = obj["rotated_w"] / px_per_cm
-            width_cm = obj["rotated_h"] / px_per_cm
+            length_cm = obj["rotated_w"] / px_per_cm_length
+            width_cm = obj["rotated_h"] / px_per_cm_width
             box_id = len(self.captured_boxes) + 1
 
             box = {
@@ -725,7 +798,14 @@ class DetectorApp:
                 "image": str(image_path),
                 "mode": self.mode_var.get(),
                 "roi": self.roi_var.get(),
-                "px_per_cm": self.px_per_cm_var.get(),
+                "px_per_cm": {
+                    "length": self.px_per_cm_var.get(),
+                    "width": self.px_per_cm_width_var.get(),
+                },
+                "reference_cm": {
+                    "length": self.reference_length_var.get(),
+                    "width": self.reference_width_var.get(),
+                },
                 "container": container_data,
                 "objects": objects_data,
                 "added_boxes": added_boxes,
@@ -854,8 +934,12 @@ class DetectorApp:
                         "source_y",
                         "source_rotated_w",
                         "source_rotated_h",
+                        "px_per_cm_length",
+                        "px_per_cm_width",
                     ]
                 )
+
+            px_per_cm_length, px_per_cm_width = self.get_px_per_cm()
 
             for box in boxes:
                 writer.writerow(
@@ -869,6 +953,8 @@ class DetectorApp:
                         box["source_y"],
                         box["source_rotated_w"],
                         box["source_rotated_h"],
+                        px_per_cm_length,
+                        px_per_cm_width,
                     ]
                 )
 
