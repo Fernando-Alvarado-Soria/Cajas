@@ -52,6 +52,7 @@ class DetectorApp:
         self.px_per_cm_width_var = tk.StringVar(value="38.24")
         self.reference_length_var = tk.StringVar(value="9.02")
         self.reference_width_var = tk.StringVar(value="5.1")
+        self.manual_depth_var = tk.StringVar(value="2.0")
 
         self.build_layout()
 
@@ -93,6 +94,7 @@ class DetectorApp:
         self.add_input(advanced, "Aspect min", self.min_aspect_var, 1)
         self.add_input(advanced, "Aspect max", self.max_aspect_var, 2)
         self.add_input(advanced, "Extent min", self.min_extent_var, 3)
+        self.add_input(advanced, "Profundidad cm", self.manual_depth_var, 4)
 
         container_controls = ttk.LabelFrame(controls, text="Contenedor", padding=8)
         container_controls.grid(row=2, column=0, columnspan=15, sticky="ew", pady=(8, 0))
@@ -181,7 +183,7 @@ class DetectorApp:
             pady=(6, 0),
         )
 
-        box_columns = ("id", "largo", "ancho", "estado")
+        box_columns = ("id", "largo", "alto", "prof", "estado")
         self.box_tree = ttk.Treeview(
             packing,
             columns=box_columns,
@@ -191,7 +193,7 @@ class DetectorApp:
 
         for column in box_columns:
             self.box_tree.heading(column, text=column)
-            self.box_tree.column(column, width=95, anchor="center")
+            self.box_tree.column(column, width=78, anchor="center")
 
         self.box_tree.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         box_scrollbar = ttk.Scrollbar(packing, orient="vertical", command=self.box_tree.yview)
@@ -255,6 +257,14 @@ class DetectorApp:
 
         return px_per_cm_length, px_per_cm_width
 
+    def get_manual_depth_cm(self):
+        depth_cm = float(self.manual_depth_var.get())
+
+        if depth_cm <= 0:
+            raise ValueError("Profundidad cm debe ser mayor a 0.")
+
+        return depth_cm
+
     def calibrate_from_detection(self):
         if not self.last_objects:
             messagebox.showinfo(
@@ -303,7 +313,10 @@ class DetectorApp:
 
         for box in self.captured_boxes:
             box["length_cm"] = round(box["source_rotated_w"] / px_per_cm_length, 2)
-            box["width_cm"] = round(box["source_rotated_h"] / px_per_cm_width, 2)
+            box["height_cm"] = round(box["source_rotated_h"] / px_per_cm_width, 2)
+
+            if "depth_cm" not in box:
+                box["depth_cm"] = round(box.get("width_cm", 0), 2)
 
         if self.packing_started:
             self.recompute_packing()
@@ -452,7 +465,7 @@ class DetectorApp:
 
         for box in self.unplaced_boxes[:6]:
             width = max(28, min(box["length_cm"] * scale, 80))
-            height = max(18, min(box["width_cm"] * scale, 34))
+            height = max(18, min(box["depth_cm"] * scale, 34))
 
             if current_x + width > max_width:
                 break
@@ -515,7 +528,8 @@ class DetectorApp:
                 values=(
                     box["id"],
                     f"{box['length_cm']:.2f} cm",
-                    f"{box['width_cm']:.2f} cm",
+                    f"{box.get('height_cm', box.get('width_cm', 0)):.2f} cm",
+                    f"{box.get('depth_cm', 0):.2f} cm",
                     status,
                 ),
             )
@@ -584,11 +598,11 @@ class DetectorApp:
 
     def choose_orientation(self, box, available_length, available_width):
         length = box["length_cm"]
-        width = box["width_cm"]
-        options = [(length, width, False)]
+        depth = box["depth_cm"]
+        options = [(length, depth, False)]
 
-        if length != width:
-            options.append((width, length, True))
+        if length != depth:
+            options.append((depth, length, True))
 
         valid_options = [
             option
@@ -603,19 +617,21 @@ class DetectorApp:
 
     def add_detected_boxes_to_container(self, objects, timestamp, image_path):
         px_per_cm_length, px_per_cm_width = self.get_px_per_cm()
+        depth_cm = self.get_manual_depth_cm()
         added_boxes = []
 
         for obj in objects:
             length_cm = obj["rotated_w"] / px_per_cm_length
-            width_cm = obj["rotated_h"] / px_per_cm_width
+            height_cm = obj["rotated_h"] / px_per_cm_width
             box_id = len(self.captured_boxes) + 1
 
             box = {
                 "id": box_id,
                 "timestamp": timestamp,
                 "image": str(image_path),
-                "length_cm": round(length_cm, 2),
-                "width_cm": round(width_cm, 2),
+                "length_cm": round(length_cm, 3),# se cambio a 3 estaba en 2
+                "height_cm": round(height_cm, 3),# se cambio a 3 estaba en 2
+                "depth_cm": round(depth_cm, 2),
                 "source_x": int(obj["x"]),
                 "source_y": int(obj["y"]),
                 "source_rotated_w": int(obj["rotated_w"]),
@@ -806,6 +822,7 @@ class DetectorApp:
                     "length": self.reference_length_var.get(),
                     "width": self.reference_width_var.get(),
                 },
+                "manual_depth_cm": self.manual_depth_var.get(),
                 "container": container_data,
                 "objects": objects_data,
                 "added_boxes": added_boxes,
@@ -929,7 +946,8 @@ class DetectorApp:
                         "timestamp",
                         "image",
                         "length_cm",
-                        "width_cm",
+                        "height_cm",
+                        "depth_cm",
                         "source_x",
                         "source_y",
                         "source_rotated_w",
@@ -948,7 +966,8 @@ class DetectorApp:
                         box["timestamp"],
                         box["image"],
                         box["length_cm"],
-                        box["width_cm"],
+                        box.get("height_cm", box.get("width_cm", 0)),
+                        box.get("depth_cm", 0),
                         box["source_x"],
                         box["source_y"],
                         box["source_rotated_w"],
